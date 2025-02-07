@@ -24,6 +24,7 @@ def _retrieve_internal_jitted_parallel(
     num_docs: int,
     nonoccurrence_array: np.ndarray = None,
     weight_mask: np.ndarray = None,
+    query_weights_flat: np.ndarray = None,
 ):
     N = len(query_pointers) - 1
 
@@ -32,7 +33,7 @@ def _retrieve_internal_jitted_parallel(
 
     for i in prange(N):
         query_tokens_single = query_tokens_ids_flat[query_pointers[i] : query_pointers[i + 1]]
-
+        query_weights_single = query_weights_flat[query_pointers[i] : query_pointers[i + 1]]
         # query_tokens_single = np.asarray(query_tokens_single, dtype=int_dtype)
         scores_single = _compute_relevance_from_scores_jit_ready(
             query_tokens_ids=query_tokens_single,
@@ -41,6 +42,7 @@ def _retrieve_internal_jitted_parallel(
             indices=indices,
             num_docs=num_docs,
             dtype=dtype,
+            query_weights=query_weights_single,
         )
 
         # if there's a non-occurrence array, we need to add the non-occurrence score
@@ -77,6 +79,7 @@ def _retrieve_numba_functional(
     dtype="float32",
     int_dtype="int32",
     weight_mask=None,
+    query_weights=None,
 ):  
     from numba import get_num_threads, set_num_threads, njit
 
@@ -113,6 +116,7 @@ def _retrieve_numba_functional(
     # pointers to the start of each query to be used to find the boundaries of each query
     query_pointers = np.cumsum([0] + [len(q) for q in query_tokens_ids], dtype=int_dtype)
     query_tokens_ids_flat = np.concatenate(query_tokens_ids).astype(int_dtype)
+    query_weights_flat = np.concatenate(query_weights).astype(dtype)
 
     retrieved_scores, retrieved_indices = _retrieve_internal_jitted_parallel(
         query_pointers=query_pointers,
@@ -127,6 +131,7 @@ def _retrieve_numba_functional(
         num_docs=scores["num_docs"],
         nonoccurrence_array=nonoccurrence_array,
         weight_mask=weight_mask,
+        query_weights_flat=query_weights_flat,
     )
 
     # reset the number of threads

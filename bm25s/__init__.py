@@ -6,7 +6,7 @@ import os
 import logging
 from pathlib import Path
 import json
-from typing import Any, Tuple, Dict, Iterable, List, NamedTuple, Union
+from typing import Any, Tuple, Dict, Iterable, List, NamedTuple, Union, Callable
 
 import numpy as np
 
@@ -141,6 +141,7 @@ class BM25:
         int_dtype="int32",
         corpus=None,
         backend="numpy",
+        weight_query=False,
     ):
         """
         BM25S initialization.
@@ -191,12 +192,14 @@ class BM25:
         self.methods_requiring_nonoccurrence = ("bm25l", "bm25+")
         self.corpus = corpus
         self._original_version = __version__
-
+        self.weight_query = weight_query
+        self.query_weight_fn = None
+        
         if backend == "auto":
             self.backend = "numba" if selection_jit is not None else "numpy"
         else:
             self.backend = backend
-
+    
     @staticmethod
     def _infer_corpus_object(corpus):
         """
@@ -228,6 +231,7 @@ class BM25:
         num_docs: int,
         query_tokens_ids: np.ndarray,
         dtype: np.dtype,
+        query_weight_fn: Callable = None,
     ) -> np.ndarray:
         """
         This internal static function calculates the relevance scores for a given query,
@@ -260,17 +264,26 @@ class BM25:
         This function was optimized by the baguetter library. The original implementation can be found at:
         https://github.com/mixedbread-ai/baguetter/blob/main/baguetter/indices/sparse/models/bm25/index.py
         """
-        indptr_starts = indptr[query_tokens_ids]
-        indptr_ends = indptr[query_tokens_ids + 1]
-
+        
         scores = np.zeros(num_docs, dtype=dtype)
-        for i in range(len(query_tokens_ids)):
-            start, end = indptr_starts[i], indptr_ends[i]
-            np.add.at(scores, indices[start:end], data[start:end])
+        
+        if query_weight_fn is None:
+            indptr_starts = indptr[query_tokens_ids]
+            indptr_ends   = indptr[query_tokens_ids + 1]
+            for i in range(len(query_tokens_ids)):
+                start, end = indptr_starts[i], indptr_ends[i]
+                np.add.at(scores, indices[start:end], data[start:end])
 
-            # # The following code is slower with numpy, but faster after JIT compilation
-            # for j in range(start, end):
-            #     scores[indices[j]] += data[j]
+                # # The following code is slower with numpy, but faster after JIT compilation
+                # for j in range(start, end):
+                #     scores[indices[j]] += data[j]
+        else:
+            query_tokens_ids, query_weights = query_weight_fn(query_tokens_ids)
+            indptr_starts = indptr[query_tokens_ids]
+            indptr_ends   = indptr[query_tokens_ids + 1]
+            for i in range(len(query_tokens_ids)):
+                start, end = indptr_starts[i], indptr_ends[i]
+                np.add.at(scores, indices[start:end], data[start:end] * query_weights[i])
 
         return scores
 
@@ -369,6 +382,20 @@ class BM25:
             "indptr": indptr,
             "num_docs": n_docs,
         }
+        
+        # <<
+        # [BKJ]
+        if self.weight_query:
+            _tfc_scorer = _select_tfc_scorer(self.method)
+            
+            def _query_weight_fn(query_tokens_ids):
+                unique_ids, tf_array = np.unique(query_tokens_ids, return_counts=True)
+                query_weights = idf_array[unique_ids] * _tfc_scorer(tf_array, tf_array.sum(), avg_doc_len, self.k1, self.b, self.delta)
+                return unique_ids, query_weights
+        
+            self.query_weight_fn = _query_weight_fn
+        # >>
+        
         return scores
 
     def build_index_from_tokens(
@@ -526,6 +553,7 @@ class BM25:
             num_docs=num_docs,
             query_tokens_ids=query_tokens_ids,
             dtype=dtype,
+            query_weight_fn=self.query_weight_fn,
         )
 
         if weight_mask is not None:
@@ -774,7 +802,12 @@ class BM25:
                 raise ValueError(
                     "The query_tokens must be a list of list of tokens (str for stemmed words, int for token ids matching corpus) or a tuple of two lists: the first list is the list of unique token IDs, and the second list is the list of token IDs for each document."
                 )
-
+            
+            if self.weight_query:
+                query_tokens_ids, query_weights = zip(*[self.query_weight_fn(xx) for xx in query_tokens_ids])
+            else:
+                query_weights = [np.ones(len(xx)) for xx in query_tokens_ids]
+            
             res = _retrieve_numba_functional(
                 query_tokens_ids=query_tokens_ids,
                 scores=self.scores,
@@ -790,6 +823,7 @@ class BM25:
                 dtype=self.dtype,
                 int_dtype=self.int_dtype,
                 nonoccurrence_array=self.nonoccurrence_array,
+                query_weights=query_weights,
             )
 
             if return_as == "tuple":
@@ -1173,15 +1207,16 @@ class BM25:
         Behind the scenes, this will reassign the `_compute_relevance_from_scores` method
         to the JIT-compiled version of the function.
         """
-        try:
-            from numba import njit
-        except ImportError:
-            raise ImportError(
-                "Numba is not installed. Please install Numba to compile the Numba scorer with `pip install numba`."
-            )
+        raise Exception()
+        # try:
+        #     from numba import njit
+        # except ImportError:
+        #     raise ImportError(
+        #         "Numba is not installed. Please install Numba to compile the Numba scorer with `pip install numba`."
+        #     )
 
-        from .scoring import _compute_relevance_from_scores_jit_ready
+        # from .scoring import _compute_relevance_from_scores_jit_ready
 
-        self._compute_relevance_from_scores = njit(
-            _compute_relevance_from_scores_jit_ready
-        )
+        # self._compute_relevance_from_scores = njit(
+        #     _compute_relevance_from_scores_jit_ready
+        # )

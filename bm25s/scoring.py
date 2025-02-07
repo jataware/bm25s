@@ -333,6 +333,7 @@ def _compute_relevance_from_scores_jit_ready(
     num_docs: int,
     query_tokens_ids: np.ndarray,
     dtype: np.dtype,
+    query_weights: np.ndarray,
 ) -> np.ndarray:
     """
     This internal static function calculates the relevance scores for a given query,
@@ -347,6 +348,6 @@ def _compute_relevance_from_scores_jit_ready(
         start, end = indptr_starts[i], indptr_ends[i]
         # The following code is slower with numpy, but faster after JIT compilation
         for j in range(start, end):
-            scores[indices[j]] += data[j]
+            scores[indices[j]] += data[j] * query_weights[i]
 
     return scores
